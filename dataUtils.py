@@ -150,3 +150,53 @@ def get_ds_in_polar_r_star_coords(r_star_ref_ax, theta_ref_ax, ds_all, time_idx)
     })
     
     return ds_polar
+
+# @da.delayed
+def get_ds_in_polar_r_star_coords_v02(ds_all, time_idx, res_ref):
+    '''Given the global xarray.Dataset ds_all, a time_idx and a resolution res_ref, 
+    returns ds_polar, an xarray.Dataset containg ds['wind_speed'] interpolated on a (r*, th) polar grid'''
+    # Meshgrid (x, y)
+    ds   = ds_all.isel(time=time_idx)
+    x, y = np.meshgrid(ds['x'], ds['y'])
+
+    # Convert to polar (r, th)
+    r, th = cart2pol(x, y)
+    th    = np.pi / 2 - th
+
+    # Compute Rmax and put on (r*, th)
+    ds_r, ds_th      = get_polar_grid(ds_all)
+    _, _, Rmax, Vmax = get_polar_coords_r_star(ds, ds_r, ds_th)
+    ds               = ds.assign_coords({'r': ds_r, 'th': ds_th})
+    Rmax, Vmax       = compute_Rmax_Vmax(ds, r)
+    r               /= Rmax
+    # Polar plot to check
+    # plt.clf()
+    # ax = plt.subplot(projection = "polar")
+    # plt.pcolormesh(th, r, ds['wind_speed']);plt.colorbar()
+    # ax.set_theta_zero_location("N")  # theta=0 at the top
+    # ax.set_theta_direction(-1)  # theta increasing clockwise
+
+    # Create reference grid
+    x_ref         = x[::res_ref, ::res_ref]
+    y_ref         = y[::res_ref, ::res_ref]
+    r_ref, th_ref = cart2pol(x_ref, y_ref)
+    r_ref        /= 100000                     # Scale to have r_star
+    th_ref        = np.pi / 2 - th_ref
+
+
+    # Interpolate ds['wind_speed'] to this reference grid
+    ds_ws         = np.array(ds['wind_speed'])
+    ws_interp     = griddata((r.flatten(), th.flatten()), ds_ws.flatten(), (r_ref, th_ref), method='nearest')
+    
+    time     = ds_all['time'].values[time_idx] 
+    ws_interp = np.expand_dims(ws_interp, axis=0)
+    ds_polar = xr.Dataset({'cat':        xr.DataArray(int(ds['cat']),               coords={'time': [time]}, dims=['time']),
+                           'storm_name': xr.DataArray(str(ds['storm_name'].values), coords={'time': [time]}, dims=['time']),
+                           'storm_id':   xr.DataArray(str(ds['storm_id'].values),   coords={'time': [time]}, dims=['time']),
+                           'storm_id':   xr.DataArray(str(ds['storm_id'].values),   coords={'time': [time]}, dims=['time']),
+                           'rmax':       xr.DataArray(Rmax,                         coords={'time': [time]}, dims=['time']),
+                           'vmax':       xr.DataArray(Vmax,                         coords={'time': [time]}, dims=['time']),
+                           # Wind speed
+                           'wind_speed': xr.DataArray(ws_interp, coords={'time': [time], 'r*_grid': (('r*', 'th'), r_ref), 'th_grid': (('r*', 'th'), th_ref)}, dims=['time', 'r*', 'th'])
+    })
+    return ds_polar
