@@ -151,7 +151,7 @@ def get_ds_in_polar_r_star_coords(r_star_ref_ax, theta_ref_ax, ds_all, time_idx)
     
     return ds_polar
 
-# @da.delayed
+@da.delayed
 def get_ds_in_polar_r_star_coords_v02(ds_all, time_idx, res_ref):
     '''Given the global xarray.Dataset ds_all, a time_idx and a resolution res_ref, 
     returns ds_polar, an xarray.Dataset containg ds['wind_speed'] interpolated on a (r*, th) polar grid'''
