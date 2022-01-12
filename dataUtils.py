@@ -200,3 +200,29 @@ def get_ds_in_polar_r_star_coords_v02(ds_all, time_idx, res_ref):
                            'wind_speed': xr.DataArray(ws_interp, coords={'time': [time], 'r*_grid': (('r*', 'th'), r_ref), 'th_grid': (('r*', 'th'), th_ref)}, dims=['time', 'r*', 'th'])
     })
     return ds_polar
+
+def covariance_matrix(ds_polar_all, order_by=None, print_shapes=False):
+    '''Given an xarray.Dataset in polar (r, th) coordinates, returns the covariance matrix of that dataset.
+    Possible values for order_by: 'r*_grid', 'th_grid'
+    '''
+    ds_polar_stack = ds_polar_all.stack(dimensions={'pixel': ('r*', 'th')})
+    if order_by:
+        ds_polar_stack = ds_polar_stack.sortby(order_by) # reorder by r* for instance
+        
+    x_Ex            = ds_polar_stack['wind_speed'] - ds_polar_stack.mean(dim='pixel', skipna=True)['wind_speed']  # X - mean(X) for each pixel
+    # Expand dimension to prepare matrix multiplication
+    x_Ex_expanded   = x_Ex.assign_coords(y='vector_dim')
+    x_Ex_expanded   = x_Ex_expanded.expand_dims('vector_dim', axis=2)
+    if print_shapes: print('x_Ex_expanded shape: ', x_Ex_expanded.shape)
+    x_Ex_transposed = x_Ex_expanded.transpose('time', 'vector_dim', 'pixel')
+    if print_shapes: print('x_Ex_transposed shape: ', x_Ex_transposed.shape)
+    # Matrix multiplication
+    a       = np.array(x_Ex_expanded)
+    b       = np.array(x_Ex_transposed)
+    product = np.einsum('ijk, ikl -> ijl', a, b) # input: (20, 10 000, 1) and (20, 1, 10 000) -> output: (20, 10 000, 10 000)
+    if print_shapes: print('product shape: ', product.shape)
+    # Mean on time to get covariance
+    cov_mat = np.nanmean(product, axis=0)
+    if print_shapes: print('cov_mat shape: ', cov_mat.shape)
+    
+    return cov_mat, ds_polar_stack
