@@ -3,6 +3,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from scipy.interpolate import griddata
 from scipy.signal import convolve2d
+from tqdm import tqdm
 import dask as da
 
 def cart2pol(x, y):
@@ -152,9 +153,11 @@ def get_ds_in_polar_r_star_coords(r_star_ref_ax, theta_ref_ax, ds_all, time_idx)
     return ds_polar
 
 # @da.delayed
-def get_ds_in_polar_r_star_coords_v02(ds_all, time_idx, res_ref):
+def get_ds_in_polar_r_star_coords_v02(ds_all, time_idx, res_ref=10, r_ref_divider=100000):
     '''Given the global xarray.Dataset ds_all, a time_idx and a resolution res_ref, 
-    returns ds_polar, an xarray.Dataset containg ds['wind_speed'] interpolated on a (r*, th) polar grid'''
+    returns ds_polar, an xarray.Dataset containg ds['wind_speed'] interpolated on a (r*, th) polar grid
+    Increase r_ref to degrade resolution;
+    Decrease r_ref_divider to have a wider range of r* (e.g 0 < r* < 8 instead of 0 < r* < 4)'''
     # Meshgrid (x, y)
     ds   = ds_all.isel(time=time_idx)
     x, y = np.meshgrid(ds['x'], ds['y'])
@@ -180,9 +183,8 @@ def get_ds_in_polar_r_star_coords_v02(ds_all, time_idx, res_ref):
     x_ref         = x[::res_ref, ::res_ref]
     y_ref         = y[::res_ref, ::res_ref]
     r_ref, th_ref = cart2pol(x_ref, y_ref)
-    r_ref        /= 100000                     # Scale to have r_star
+    r_ref        /= r_ref_divider              # Scale to have r_star
     th_ref        = np.pi / 2 - th_ref
-
 
     # Interpolate ds['wind_speed'] to this reference grid
     ds_ws         = np.array(ds['wind_speed'])
@@ -226,3 +228,40 @@ def covariance_matrix(ds_polar_all, order_by=None, print_shapes=False):
     if print_shapes: print('cov_mat shape: ', cov_mat.shape)
     
     return cov_mat, ds_polar_stack
+
+def filter_out_wind_speed(ds_all, time_idx):
+    ds_ws                    = np.asarray(ds_all.isel(time=time_idx)['wind_speed'])
+    ds_ones                  = np.ones(ds_ws.shape)
+    ds_ones[np.isnan(ds_ws)] = 0.
+
+    # Convolve this with a 10 x 10 kernel of ones to count the number of NaNs
+    kernel                   = np.ones((10, 10))
+    valid_counter            = convolve2d(ds_ones, kernel, mode='same')
+    valid_counter           /= kernel.shape[0] * kernel.shape[1]
+
+    # Set to NaN where threshold is exceeded
+    thresh                        = 0.99
+    ds_ws[valid_counter < thresh] = np.nan # if there is less than 99% (thresh = 0.99) of valid values, we set to nan 
+
+    # Create new dataArray with right wind speed
+    ds_ws = np.expand_dims(ds_ws, axis=0)
+    new_ws = xr.DataArray(data=ds_ws,
+                          dims=['time', 'x', 'y'],
+                          coords={'time': (['time'], [ds_all.isel(time=time_idx)['time'].values]),
+                                  'x': (['x'], np.array(ds_all.isel(time=time_idx)['x'])),
+                                  'y': (['y'], np.array(ds_all.isel(time=time_idx)['y']))})
+    ds = xr.Dataset({'wind_speed': new_ws})
+    return ds
+
+def filter_out_whole_dataset(ds_all):
+    listOfDatasets = []
+    print('Filtering wind speed pixel outliers...')
+    for time_idx in tqdm(range(len(ds_all['time']))):
+        ds = filter_out_wind_speed(ds_all, time_idx)
+        listOfDatasets.append(ds)
+    
+    new_values = xr.concat(listOfDatasets, dim='time')
+    ds_all     = ds_all.update(new_values)
+    
+    return ds_all
+
