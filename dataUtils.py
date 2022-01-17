@@ -247,6 +247,8 @@ def get_ds_in_polar_r_star_coords_v03(ds_all, time_idx, r_ref_ax, th_ref_ax):
                            'storm_id':   xr.DataArray(str(ds['storm_id'].values),   coords={'time': [time]}, dims=['time']),
                            'rmax':       xr.DataArray(Rmax,                         coords={'time': [time]}, dims=['time']),
                            'vmax':       xr.DataArray(Vmax,                         coords={'time': [time]}, dims=['time']),
+                           'lat':        xr.DataArray(float(ds['lat'][499, 499]),   coords={'time': [time]}, dims=['time']),
+                           'lon':        xr.DataArray(float(ds['lon'][499, 499]),   coords={'time': [time]}, dims=['time']),
                            # Wind speed
                            'wind_speed': xr.DataArray(ws_interp, coords={'time': [time], 'th': ('th', th_ref_ax), 'r*': ('r*', r_ref_ax)}, dims=['time', 'th', 'r*']),
     })
