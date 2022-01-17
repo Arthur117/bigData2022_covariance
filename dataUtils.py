@@ -5,6 +5,7 @@ from scipy.interpolate import griddata
 from scipy.signal import convolve2d
 from tqdm import tqdm
 import dask as da
+from dask.diagnostics import ProgressBar
 
 def cart2pol(x, y):
     r  = np.sqrt(x**2 + y**2)
@@ -203,6 +204,54 @@ def get_ds_in_polar_r_star_coords_v02(ds_all, time_idx, res_ref=10, r_ref_divide
     })
     return ds_polar
 
+def get_ds_in_polar_r_star_coords_v03(ds_all, time_idx, r_ref_ax, th_ref_ax):
+    # Create reference grid
+    r_ref, th_ref = np.meshgrid(r_ref_ax, th_ref_ax)
+
+    # Select ds and convert to polar (r, th)
+    ds    = ds_all.isel(time=time_idx)
+    x, y  = np.meshgrid(ds['x'], ds['y'])
+    r, th = cart2pol(x, y)
+    th    = np.pi / 2 - th
+
+    # Compute Rmax and put on (r*, th)
+    ds_r, ds_th      = get_polar_grid(ds_all)
+    _, _, Rmax, Vmax = get_polar_coords_r_star(ds, ds_r, ds_th)
+    ds               = ds.assign_coords({'r': ds_r, 'th': ds_th})
+    Rmax, Vmax       = compute_Rmax_Vmax(ds, r)
+    r               /= Rmax
+    # # Polar plot to check
+    # plt.clf()
+    # ax = plt.subplot(projection = "polar")
+    # plt.pcolormesh(th, r, ds['wind_speed']);plt.colorbar()
+    # ax.set_theta_zero_location("N")  # theta=0 at the top
+    # ax.set_theta_direction(-1)  # theta increasing clockwise
+
+    # Interpolate ds['wind_speed'] to this reference grid
+    ds_ws         = np.array(ds['wind_speed'])
+    ds_r          = np.array(ds_r)
+    ds_th         = np.array(ds_th)
+    ws_interp     = griddata((ds_r.flatten(), ds_th.flatten()), ds_ws.flatten(), (r_ref, th_ref), method='nearest')
+    # # Polar plot to check
+    # plt.clf()
+    # ax = plt.subplot(projection = "polar")
+    # plt.pcolormesh(np.deg2rad(th_ref), r_ref, ws_interp);plt.colorbar() # Put theta in radians!! 
+    # ax.set_theta_zero_location("N")  # theta=0 at the top
+    # ax.set_theta_direction(-1)  # theta increasing clockwise
+
+    time      = ds_all['time'].values[time_idx] 
+    ws_interp = np.expand_dims(ws_interp, axis=0)
+    ds_polar  = xr.Dataset({'cat':       xr.DataArray(int(ds['cat']),               coords={'time': [time]}, dims=['time']),
+                           'storm_name': xr.DataArray(str(ds['storm_name'].values), coords={'time': [time]}, dims=['time']),
+                           'storm_id':   xr.DataArray(str(ds['storm_id'].values),   coords={'time': [time]}, dims=['time']),
+                           'storm_id':   xr.DataArray(str(ds['storm_id'].values),   coords={'time': [time]}, dims=['time']),
+                           'rmax':       xr.DataArray(Rmax,                         coords={'time': [time]}, dims=['time']),
+                           'vmax':       xr.DataArray(Vmax,                         coords={'time': [time]}, dims=['time']),
+                           # Wind speed
+                           'wind_speed': xr.DataArray(ws_interp, coords={'time': [time], 'th': ('th', th_ref_ax), 'r*': ('r*', r_ref_ax)}, dims=['time', 'th', 'r*']),
+    })
+    return ds_polar
+
 def covariance_matrix(ds_polar_all, order_by=None, print_shapes=False):
     '''Given an xarray.Dataset in polar (r, th) coordinates, returns the covariance matrix of that dataset.
     Possible values for order_by: 'r*_grid', 'th_grid'
@@ -229,6 +278,27 @@ def covariance_matrix(ds_polar_all, order_by=None, print_shapes=False):
     
     return cov_mat, ds_polar_stack
 
+def covariance_matrix_1D(ds_1D, dim='r*', print_shapes=False):
+    '''Given an xarray.Dataset in 1D r* coordinates, returns the covariance matrix of that dataset.
+    dim is the dimension used for covariance computation, either r* or th.
+    '''
+    x_Ex            = ds_1D['wind_speed'] - ds_1D.mean(dim=dim, skipna=True)['wind_speed']  # X - mean(X) for each pixel
+    # Expand dimension to prepare matrix multiplication
+    x_Ex_expanded   = x_Ex.assign_coords(y='vector_dim')
+    x_Ex_expanded   = x_Ex_expanded.expand_dims('vector_dim', axis=2)
+    if print_shapes: print('x_Ex_expanded shape: ', x_Ex_expanded.shape)
+    x_Ex_transposed = x_Ex_expanded.transpose('time', 'vector_dim', dim)
+    if print_shapes: print('x_Ex_transposed shape: ', x_Ex_transposed.shape)
+    # Matrix multiplication
+    a       = np.array(x_Ex_expanded)
+    b       = np.array(x_Ex_transposed)
+    product = np.einsum('ijk, ikl -> ijl', a, b) # input: (20, 10 000, 1) and (20, 1, 10 000) -> output: (20, 10 000, 10 000)
+    if print_shapes: print('product shape: ', product.shape)
+    # Mean on time to get covariance
+    cov_mat = np.nanmean(product, axis=0)
+    if print_shapes: print('cov_mat shape: ', cov_mat.shape)
+    return cov_mat, product
+
 def filter_out_wind_speed(ds_all, time_idx):
     ds_ws                    = np.asarray(ds_all.isel(time=time_idx)['wind_speed'])
     ds_ones                  = np.ones(ds_ws.shape)
@@ -240,8 +310,11 @@ def filter_out_wind_speed(ds_all, time_idx):
     valid_counter           /= kernel.shape[0] * kernel.shape[1]
 
     # Set to NaN where threshold is exceeded
-    thresh                        = 0.99
-    ds_ws[valid_counter < thresh] = np.nan # if there is less than 99% (thresh = 0.99) of valid values, we set to nan 
+    thresh                   = 0.99
+    thresh_wind_speed        = 50   # We filter only if the pixel has a value superior than 50 m/s
+    mask                     = valid_counter < thresh
+    mask[ds_ws < 50]         = False
+    ds_ws[mask]              = np.nan # if there is less than 99% (thresh = 0.99) of valid values, we set to nan 
 
     # Create new dataArray with right wind speed
     ds_ws = np.expand_dims(ds_ws, axis=0)
@@ -265,3 +338,33 @@ def filter_out_whole_dataset(ds_all):
     
     return ds_all
 
+# @da.delayed
+def save_wind_field(ds_all, time_idx, save_dir):
+    # Open file
+    ds          = ds_all.isel(time=time_idx)
+    
+    # Get additional information
+    TC_cat      = int(ds['cat'].values)
+    TC_name     = str(ds['storm_name'].values)
+    TC_id       = str(ds['storm_id'].values)
+    
+    # Plot
+    fig, _ = plt.subplots()
+    plt.title('SAR wind field\n%s, %s'%(TC_name, TC_id) + ', Cat. %i'%TC_cat, weight='bold')
+    
+    x, y   = np.meshgrid(ds['x'], ds['y'])
+    plt.pcolormesh(x, y, ds['wind_speed'][:, :])
+    
+    plt.xlabel('x (m)');plt.ylabel('y (m)');plt.grid()
+    plt.subplots_adjust(right=0.8)
+    cbar = plt.colorbar()
+    cbar.set_label('Wind speed (m/s)', rotation=270);cbar.ax.get_yaxis().labelpad=25
+    
+    # Save
+    fig.set_size_inches(25, 18)
+    plt.savefig(save_dir + '{0:03}'.format(time_idx) + '.jpg', dpi=100)
+    return None
+
+def save_all_wind_fields(ds_all, save_dir):
+    for time_idx in range(len(ds_all['time'])):
+        save_wind_field(ds_all, time_idx, save_dir) 
