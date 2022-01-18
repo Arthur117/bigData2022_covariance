@@ -284,7 +284,8 @@ def covariance_matrix_1D(ds_1D, dim='r*', print_shapes=False):
     '''Given an xarray.Dataset in 1D r* coordinates, returns the covariance matrix of that dataset.
     dim is the dimension used for covariance computation, either r* or th.
     '''
-    x_Ex            = ds_1D['wind_speed'] - ds_1D.mean(dim=dim, skipna=True)['wind_speed']  # X - mean(X) for each pixel
+    # x_Ex            = ds_1D['wind_speed'] - ds_1D.mean(dim=dim, skipna=True)['wind_speed']  # X - mean(X) for each pixel
+    x_Ex            = ds_1D['wind_speed'] - ds_1D.mean(dim='time', skipna=True)['wind_speed']  # X - mean(X) for each pixel
     # Expand dimension to prepare matrix multiplication
     x_Ex_expanded   = x_Ex.assign_coords(y='vector_dim')
     x_Ex_expanded   = x_Ex_expanded.expand_dims('vector_dim', axis=2)
